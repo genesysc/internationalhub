@@ -1,0 +1,9 @@
+{
+  "name": "meridian_leads",
+  "uuid": "8aae4b97-849b-485a-9fd2-b8bf310faad4",
+  "created_at": "2026-07-03T15:50:05.783Z",
+  "version": "production",
+  "num_tables": 0,
+  "file_size": 24576,
+  "note": "Database is provisioned but currently empty (0 tables) — no schema has been applied yet, so there is no schema/data to back up."
+}
