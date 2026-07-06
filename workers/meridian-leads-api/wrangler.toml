@@ -6,3 +6,7 @@ compatibility_date = "2026-07-05"
 binding = "DB"
 database_name = "meridian_leads"
 database_id = "8aae4b97-849b-485a-9fd2-b8bf310faad4"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "b58acfd881ad48ed8d6f59d9a344d3b5"
