@@ -7,7 +7,7 @@ for the affected Worker.
 
 | Worker | Directory | Notes |
 |---|---|---|
-| `meridian-website` | `workers/meridian-website` | Static "Hello world" placeholder |
+| `meridian-website` | moved to [`genesysc/meridian-website`](https://github.com/genesysc/meridian-website) | No longer deployed from this repo |
 | `meridian-leads-api` | `workers/meridian-leads-api` | Bound to the `meridian_leads` D1 database |
 | `meridian` | not set up | Source unavailable — see `cloudflare-backups/meridian/NOTE.md` |
 
@@ -21,10 +21,6 @@ The workflow needs two repo secrets under
   https://dash.cloudflare.com/profile/api-tokens)
 - `CLOUDFLARE_ACCOUNT_ID` — found on the right-hand sidebar of any zone's
   Overview page in the Cloudflare dashboard
-
-I don't have access to create API tokens or repo secrets, so these need
-to be added manually. Until both secrets are set, the workflow will run
-on every push to `main` but fail at the deploy step.
 
 Once set, merging a PR that touches `workers/**` deploys automatically —
 no manual copy-paste into the Cloudflare dashboard needed.
