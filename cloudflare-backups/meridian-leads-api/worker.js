@@ -6,7 +6,9 @@
  * it into Brevo for the actual nurture-email sending.
  *
  * Deploy this as a Cloudflare Worker named e.g. "meridian-leads-api",
- * with a D1 binding: variable name "DB" -> database "meridian_leads".
+ * with a D1 binding: variable name "DB" -> database "meridian_leads",
+ * and a KV binding: variable name "RATE_LIMIT_KV" -> namespace
+ * "meridian-leads-api-ratelimit" (used for per-IP rate limiting).
  * See DEPLOY_INSTRUCTIONS.md for exact click-by-click steps.
  */
 
@@ -42,6 +44,28 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+// Simple per-IP rate limit: CORS only stops browsers from reading the
+// response, it never stops a request from reaching this endpoint at all
+// (curl/scripts ignore it entirely), so this is the actual abuse guard.
+const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_WINDOW_SECONDS = 600; // 10 minutes
+
+async function isRateLimited(env, ip) {
+  const key = `ratelimit:${ip}`;
+  const current = await env.RATE_LIMIT_KV.get(key);
+  const count = current ? parseInt(current, 10) : 0;
+
+  if (count >= RATE_LIMIT_MAX) return true;
+
+  // Re-puts the full TTL on every request within the window (a sliding
+  // window) — an active abuser stays blocked as long as they keep trying,
+  // rather than getting a fresh allowance right at a fixed window boundary.
+  await env.RATE_LIMIT_KV.put(key, String(count + 1), {
+    expirationTtl: RATE_LIMIT_WINDOW_SECONDS,
+  });
+  return false;
+}
+
 async function forwardToZapier(payload) {
   // Fire-and-forget: if Zapier is briefly down or misconfigured, that
   // should never block or fail someone's registration — the D1 write
@@ -70,6 +94,14 @@ export default {
     if (request.method !== "POST") {
       return new Response(JSON.stringify({ error: "Method not allowed" }), {
         status: 405,
+        headers: { ...headers, "Content-Type": "application/json" },
+      });
+    }
+
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    if (await isRateLimited(env, ip)) {
+      return new Response(JSON.stringify({ error: "Too many requests, please try again later" }), {
+        status: 429,
         headers: { ...headers, "Content-Type": "application/json" },
       });
     }
@@ -122,7 +154,8 @@ export default {
         headers: { ...headers, "Content-Type": "application/json" },
       });
     } catch (err) {
-      return new Response(JSON.stringify({ error: "Database write failed", detail: String(err) }), {
+      console.error("Database write failed:", err);
+      return new Response(JSON.stringify({ error: "Database write failed" }), {
         status: 500,
         headers: { ...headers, "Content-Type": "application/json" },
       });
