@@ -1,9 +1,10 @@
 /**
- * Meridian — Webinar Registration API
- * Receives POSTs from webinar-register.html, writes to the
- * "meridian_leads" D1 database (table: registrations), then
- * forwards the same data to a Zapier webhook so a Zap can push
- * it into Brevo for the actual nurture-email sending.
+ * Meridian — Leads API
+ * Receives POSTs from webinar-register.html (webinar registrations,
+ * table: registrations) and affiliate.html (affiliate applications,
+ * table: affiliate_applications), routed by the request body's
+ * "formType" field. Webinar registrations also forward to a Zapier
+ * webhook so a Zap can push them into Brevo for nurture emails.
  *
  * Deploy this as a Cloudflare Worker named e.g. "meridian-leads-api",
  * with a D1 binding: variable name "DB" -> database "meridian_leads",
@@ -116,49 +117,102 @@ export default {
       });
     }
 
-    const firstname = (body.firstname || "").trim();
-    const email = (body.email || "").trim().toLowerCase();
-    const whatsapp = (body.whatsapp || "").trim();
-    const event = (body.event || "spain-webinar-aug1").trim();
-    const sourcePage = (body.sourcePage || "").trim();
+    const jsonHeaders = { ...headers, "Content-Type": "application/json" };
 
-    if (!firstname || !isValidEmail(email)) {
-      return new Response(JSON.stringify({ error: "Missing or invalid name/email" }), {
-        status: 400,
-        headers: { ...headers, "Content-Type": "application/json" },
-      });
+    if (body.formType === "affiliate") {
+      return handleAffiliateApplication(body, env, jsonHeaders);
     }
-
-    try {
-      // Upsert: if the email already exists, update their details rather
-      // than erroring or creating a duplicate row (someone re-registering
-      // shouldn't break, and shouldn't fragment your list either).
-      await env.DB.prepare(
-        `INSERT INTO registrations (firstname, email, whatsapp, source_page, event)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(email) DO UPDATE SET
-           firstname = excluded.firstname,
-           whatsapp = excluded.whatsapp,
-           source_page = excluded.source_page,
-           event = excluded.event`
-      ).bind(firstname, email, whatsapp || null, sourcePage || null, event).run();
-
-      // Forward to Zapier -> Brevo in the background, after the D1 write
-      // succeeds. ctx.waitUntil keeps this running even after we've
-      // already returned the response below, so registration feels
-      // instant to the person filling in the form.
-      ctx.waitUntil(forwardToZapier({ firstname, email, whatsapp, event, sourcePage }));
-
-      return new Response(JSON.stringify({ success: true }), {
-        status: 200,
-        headers: { ...headers, "Content-Type": "application/json" },
-      });
-    } catch (err) {
-      console.error("Database write failed:", err);
-      return new Response(JSON.stringify({ error: "Database write failed" }), {
-        status: 500,
-        headers: { ...headers, "Content-Type": "application/json" },
-      });
-    }
+    return handleWebinarRegistration(body, env, ctx, jsonHeaders);
   },
 };
+
+async function handleWebinarRegistration(body, env, ctx, jsonHeaders) {
+  const firstname = (body.firstname || "").trim();
+  const email = (body.email || "").trim().toLowerCase();
+  const whatsapp = (body.whatsapp || "").trim();
+  const event = (body.event || "spain-webinar-aug1").trim();
+  const sourcePage = (body.sourcePage || "").trim();
+
+  if (!firstname || !isValidEmail(email)) {
+    return new Response(JSON.stringify({ error: "Missing or invalid name/email" }), {
+      status: 400,
+      headers: jsonHeaders,
+    });
+  }
+
+  try {
+    // Upsert: if the email already exists, update their details rather
+    // than erroring or creating a duplicate row (someone re-registering
+    // shouldn't break, and shouldn't fragment your list either).
+    await env.DB.prepare(
+      `INSERT INTO registrations (firstname, email, whatsapp, source_page, event)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(email) DO UPDATE SET
+         firstname = excluded.firstname,
+         whatsapp = excluded.whatsapp,
+         source_page = excluded.source_page,
+         event = excluded.event`
+    ).bind(firstname, email, whatsapp || null, sourcePage || null, event).run();
+
+    // Forward to Zapier -> Brevo in the background, after the D1 write
+    // succeeds. ctx.waitUntil keeps this running even after we've
+    // already returned the response below, so registration feels
+    // instant to the person filling in the form.
+    ctx.waitUntil(forwardToZapier({ firstname, email, whatsapp, event, sourcePage }));
+
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: jsonHeaders,
+    });
+  } catch (err) {
+    console.error("Database write failed:", err);
+    return new Response(JSON.stringify({ error: "Database write failed" }), {
+      status: 500,
+      headers: jsonHeaders,
+    });
+  }
+}
+
+async function handleAffiliateApplication(body, env, jsonHeaders) {
+  const name = (body.name || "").trim();
+  const email = (body.email || "").trim().toLowerCase();
+  const applicantType = (body.applicantType || "").trim();
+  const companyName = (body.companyName || "").trim();
+  const website = (body.website || "").trim();
+  const audienceNotes = (body.audienceNotes || "").trim();
+
+  const validTypes = ["individual", "business"];
+  if (!name || !isValidEmail(email) || !validTypes.includes(applicantType)) {
+    return new Response(JSON.stringify({ error: "Missing or invalid name, email, or applicant type" }), {
+      status: 400,
+      headers: jsonHeaders,
+    });
+  }
+
+  try {
+    // Upsert on email, same reasoning as webinar registrations: someone
+    // re-applying (or fixing a typo) updates their existing row instead
+    // of erroring or creating a duplicate.
+    await env.DB.prepare(
+      `INSERT INTO affiliate_applications (name, email, applicant_type, company_name, website, audience_notes)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(email) DO UPDATE SET
+         name = excluded.name,
+         applicant_type = excluded.applicant_type,
+         company_name = excluded.company_name,
+         website = excluded.website,
+         audience_notes = excluded.audience_notes`
+    ).bind(name, email, applicantType, companyName || null, website || null, audienceNotes || null).run();
+
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: jsonHeaders,
+    });
+  } catch (err) {
+    console.error("Database write failed:", err);
+    return new Response(JSON.stringify({ error: "Database write failed" }), {
+      status: 500,
+      headers: jsonHeaders,
+    });
+  }
+}
