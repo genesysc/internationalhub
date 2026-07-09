@@ -1,10 +1,14 @@
 /**
  * Meridian — Leads API
  * Receives POSTs from webinar-register.html (webinar registrations,
- * table: registrations) and affiliate.html (affiliate applications,
- * table: affiliate_applications), routed by the request body's
- * "formType" field. Webinar registrations also forward to a Zapier
- * webhook so a Zap can push them into Brevo for nurture emails.
+ * table: registrations) and affiliate.html (affiliate applications),
+ * routed by the request body's "formType" field. Affiliate
+ * applications are further split by "applicantType" into two
+ * separate tables — affiliate_applications_individual and
+ * affiliate_applications_business — since business applications
+ * carry a required company name that individual ones don't.
+ * Webinar registrations also forward to a Zapier webhook so a Zap
+ * can push them into Brevo for nurture emails.
  *
  * Deploy this as a Cloudflare Worker named e.g. "meridian-leads-api",
  * with a D1 binding: variable name "DB" -> database "meridian_leads",
@@ -181,28 +185,60 @@ async function handleAffiliateApplication(body, env, jsonHeaders) {
   const website = (body.website || "").trim();
   const audienceNotes = (body.audienceNotes || "").trim();
 
-  const validTypes = ["individual", "business"];
-  if (!name || !isValidEmail(email) || !validTypes.includes(applicantType)) {
-    return new Response(JSON.stringify({ error: "Missing or invalid name, email, or applicant type" }), {
+  if (!name || !isValidEmail(email)) {
+    return new Response(JSON.stringify({ error: "Missing or invalid name or email" }), {
       status: 400,
       headers: jsonHeaders,
     });
   }
+
+  // Individual and business applicants live in separate tables (different
+  // shape — business rows require a company name), routed by applicantType.
+  if (applicantType === "business") {
+    if (!companyName) {
+      return new Response(JSON.stringify({ error: "Company name is required for business applicants" }), {
+        status: 400,
+        headers: jsonHeaders,
+      });
+    }
+    return insertAffiliateRow(env, jsonHeaders, {
+      table: "affiliate_applications_business",
+      columns: "contact_name, email, company_name, website, audience_notes",
+      values: [name, email, companyName, website || null, audienceNotes || null],
+    });
+  }
+
+  if (applicantType === "individual") {
+    return insertAffiliateRow(env, jsonHeaders, {
+      table: "affiliate_applications_individual",
+      columns: "name, email, website, audience_notes",
+      values: [name, email, website || null, audienceNotes || null],
+    });
+  }
+
+  return new Response(JSON.stringify({ error: "applicantType must be \"individual\" or \"business\"" }), {
+    status: 400,
+    headers: jsonHeaders,
+  });
+}
+
+async function insertAffiliateRow(env, jsonHeaders, { table, columns, values }) {
+  const placeholders = values.map(() => "?").join(", ");
+  const updateClause = columns
+    .split(", ")
+    .filter((c) => c !== "email")
+    .map((c) => `${c} = excluded.${c}`)
+    .join(", ");
 
   try {
     // Upsert on email, same reasoning as webinar registrations: someone
     // re-applying (or fixing a typo) updates their existing row instead
     // of erroring or creating a duplicate.
     await env.DB.prepare(
-      `INSERT INTO affiliate_applications (name, email, applicant_type, company_name, website, audience_notes)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(email) DO UPDATE SET
-         name = excluded.name,
-         applicant_type = excluded.applicant_type,
-         company_name = excluded.company_name,
-         website = excluded.website,
-         audience_notes = excluded.audience_notes`
-    ).bind(name, email, applicantType, companyName || null, website || null, audienceNotes || null).run();
+      `INSERT INTO ${table} (${columns})
+       VALUES (${placeholders})
+       ON CONFLICT(email) DO UPDATE SET ${updateClause}`
+    ).bind(...values).run();
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
