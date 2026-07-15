@@ -8,12 +8,16 @@
  * affiliate_applications_business — since business applications
  * carry a required company name that individual ones don't.
  * Webinar registrations also forward to a Zapier webhook so a Zap
- * can push them into Brevo for nurture emails.
+ * can push them into Brevo for nurture emails, and trigger a Brevo
+ * transactional email notifying the team of the new signup.
  *
  * Deploy this as a Cloudflare Worker named e.g. "meridian-leads-api",
  * with a D1 binding: variable name "DB" -> database "meridian_leads",
  * and a KV binding: variable name "RATE_LIMIT_KV" -> namespace
  * "meridian-leads-api-ratelimit" (used for per-IP rate limiting).
+ * Also requires a "BREVO_API_KEY" secret (wrangler secret put
+ * BREVO_API_KEY) for the registration notification email, and the
+ * NOTIFICATION_FROM_EMAIL below must be a sender verified in Brevo.
  * See DEPLOY_INSTRUCTIONS.md for exact click-by-click steps.
  */
 
@@ -35,6 +39,15 @@ const ALLOWED_ORIGINS = [
 // wire the second step to Brevo.
 // ============================================================
 const ZAPIER_WEBHOOK_URL = "https://hooks.zapier.com/hooks/catch/YOUR_ZAP_ID/YOUR_HOOK_ID/";
+
+// ============================================================
+// IMPORTANT — before launch:
+// Where new webinar registration alerts get sent, and who they're
+// sent from. The "from" address must be a verified sender in your
+// Brevo account (Settings -> Senders & IP) or the send will fail.
+// ============================================================
+const NOTIFICATION_TO_EMAIL = "info@genesysconsultancy.co.uk";
+const NOTIFICATION_FROM_EMAIL = "noreply@meridian.genesysconsultancy.co.uk";
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
@@ -83,6 +96,37 @@ async function forwardToZapier(payload) {
     });
   } catch (err) {
     console.error("Zapier forward failed (non-fatal):", err);
+  }
+}
+
+async function sendRegistrationNotification(env, { firstname, email, whatsapp, event, sourcePage }) {
+  // Same fire-and-forget reasoning as forwardToZapier: a notification
+  // failure should never affect the registrant's experience or the
+  // D1 write, which already succeeded by the time this runs.
+  try {
+    await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": env.BREVO_API_KEY,
+      },
+      body: JSON.stringify({
+        sender: { email: NOTIFICATION_FROM_EMAIL },
+        to: [{ email: NOTIFICATION_TO_EMAIL }],
+        subject: `New webinar registration: ${firstname} (${event})`,
+        htmlContent: `
+          <p>New registration for <strong>${event}</strong>:</p>
+          <ul>
+            <li>Name: ${firstname}</li>
+            <li>Email: ${email}</li>
+            <li>WhatsApp: ${whatsapp || "—"}</li>
+            <li>Source page: ${sourcePage || "—"}</li>
+          </ul>
+        `,
+      }),
+    });
+  } catch (err) {
+    console.error("Registration notification email failed (non-fatal):", err);
   }
 }
 
@@ -158,11 +202,14 @@ async function handleWebinarRegistration(body, env, ctx, jsonHeaders) {
          event = excluded.event`
     ).bind(firstname, email, whatsapp || null, sourcePage || null, event).run();
 
-    // Forward to Zapier -> Brevo in the background, after the D1 write
-    // succeeds. ctx.waitUntil keeps this running even after we've
-    // already returned the response below, so registration feels
-    // instant to the person filling in the form.
-    ctx.waitUntil(forwardToZapier({ firstname, email, whatsapp, event, sourcePage }));
+    // Forward to Zapier -> Brevo, and send a team notification email,
+    // in the background, after the D1 write succeeds. ctx.waitUntil
+    // keeps these running even after we've already returned the
+    // response below, so registration feels instant to the person
+    // filling in the form.
+    const registration = { firstname, email, whatsapp, event, sourcePage };
+    ctx.waitUntil(forwardToZapier(registration));
+    ctx.waitUntil(sendRegistrationNotification(env, registration));
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
